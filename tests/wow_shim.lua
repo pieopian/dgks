@@ -2,11 +2,8 @@
 -- exercised under plain Lua 5.1. It records every observable side effect (sounds,
 -- addon messages, chat, emotes, prints) so tests can assert on behaviour.
 --
--- Two client profiles:
---   "forever"  : Retail 12.x / WoW Forever style. No CombatLogGetCurrentEventInfo,
---                C_CombatLog present, registering COMBAT_LOG_EVENT_UNFILTERED is forbidden,
---                WOW_PROJECT_ID = 18, surnames enabled.
---   "classic"  : Classic Era style. Combat log available, WOW_PROJECT_ID = 2.
+-- It simulates one kind of client, Retail 12.x / WoW Forever: no CombatLogGetCurrentEventInfo,
+-- registering the combat log events is refused, and character names carry a surname.
 
 local M = {}
 
@@ -64,14 +61,9 @@ function M.resetWorld()
 	M.inRaid = false
 	M.isBG = false
 	M.isArena = false
-	M.pveInstance = nil		-- "party" / "raid" / "scenario" while inside a PvE instance
 	M.bnFriends = {}		-- Battle.net friends online, each a list of game accounts
-	M.cvars = {}			-- console variables that differ from "1", e.g. Sound_EnableSFX = "0"
-	M.cleu = nil
-	M.scoreInfo = nil		-- what C_PvP.GetScoreInfoByPlayerGuid returns for us (table, or nil for no entry)
-	M.scoreRequests = 0		-- RequestBattlefieldScoreData call count
+	M.cvars = {}			-- console variables that differ from "1", e.g. Sound_EnableMusic = "0"
 	M.recapEvents = nil		-- what C_DeathRecap.GetRecapEvents returns
-	M.noEmoteGlobals = false	-- true: DoEmote / SendChatMessage globals are gone (set before loadAddon)
 end
 
 local function bandImpl(a, b)
@@ -83,8 +75,7 @@ local function bandImpl(a, b)
 	return r
 end
 
-function M.install(profile)
-	M.profile = profile or "forever"
+function M.install()
 	M.resetRecorders()
 	M.resetWorld()
 	M.forbiddenEvents = {}
@@ -119,7 +110,6 @@ function M.install(profile)
 		M.secretChecks[#M.secretChecks + 1] = v
 		return type(v) == "table" and rawget(v, "__secret") == true
 	end
-	_G.canaccessvalue = function(v) return not (type(v) == "table" and rawget(v, "__secret") == true) end
 
 	-- WoW's string.format understands positional specifiers (%1$s, %2$s) used by GlobalStrings.
 	local rawformat = string.format
@@ -136,34 +126,18 @@ function M.install(profile)
 	string.format = wowformat
 	_G.format = wowformat
 
-	-- Project constants and per-client capability profile (mirrors the real clients as of Oct 2026)
+	-- The simulated client: Retail 12.x / WoW Forever
 	_G.WOW_PROJECT_MAINLINE = 1
 	_G.WOW_PROJECT_CLASSIC = 2
-	_G.WOW_PROJECT_MISTS_CLASSIC = 19
-	local cleuFn = function() return unpack(M.cleu, 1, M.cleu.n or #M.cleu) end
-	local profiles = {
-		-- WoW Forever 1.60.1: no combat-log function, C_CombatLog present and always restricted, surnames
-		forever  = { project = 18, build = { "1.60.1", "70205", "Oct 2 2026", 16001 }, cleu = nil,  ccl = true,  cleuForbidden = true,  regional = true },
-		-- Classic Era 1.15.9 (also TBC 2.5.6 / Mists 5.5.4): combat log works, but C_CombatLog exists too
-		classic  = { project = 2,  build = { "1.15.9", "69109", "Sep 1 2026", 11509 }, cleu = cleuFn, ccl = false, cleuForbidden = false, regional = false },
-		-- Retail 12.x: a deprecated combat-log wrapper may still exist, but registering CLEU is forbidden
-		retail12 = { project = 1,  build = { "12.1.5", "69848", "Sep 1 2026", 120105 }, cleu = cleuFn, ccl = false, cleuForbidden = true,  regional = false },
-		-- Retail 11.x: combat log works, no C_CombatLog, no PARTY_KILL frame event
-		retail11 = { project = 1,  build = { "11.2.7", "63000", "Jun 1 2026", 110207 }, cleu = cleuFn, ccl = nil,   cleuForbidden = false, regional = false },
-	}
-	local p = assert(profiles[M.profile], "unknown profile " .. tostring(M.profile))
-	_G.WOW_PROJECT_ID = p.project
+	_G.WOW_PROJECT_ID = 18
 	_G.LE_EXPANSION_LEVEL_CURRENT = 0
-	_G.GetBuildInfo = function() return p.build[1], p.build[2], p.build[3], p.build[4] end
-	_G.CombatLogGetCurrentEventInfo = p.cleu
-	if p.ccl == nil then _G.C_CombatLog = nil else _G.C_CombatLog = { IsCombatLogRestricted = function() return p.ccl end } end
-	if p.cleuForbidden then
-		M.forbiddenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
-		M.forbiddenEvents["COMBAT_LOG_EVENT"] = true
-	end
-	if M.profile == "retail11" then M.unknownEvents = { PARTY_KILL = true, UNIT_DIED = true, PLAYER_TARGET_DIED = true } else M.unknownEvents = {} end
-	_G.RegionalUniqueNamesEnabled = p.regional and function() return true end or nil
-
+	_G.GetBuildInfo = function() return "1.60.1", "70888", "Nov 4 2026", 16001 end
+	_G.CombatLogGetCurrentEventInfo = nil
+	_G.C_CombatLog = { IsCombatLogRestricted = function() return true end }
+	M.forbiddenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
+	M.forbiddenEvents["COMBAT_LOG_EVENT"] = true
+	M.unknownEvents = {}
+	_G.RegionalUniqueNamesEnabled = function() return true end
 	-- Frames
 	_G.CreateFrame = function(ftype, name, parent, template)
 		local f = { events = {}, scripts = {}, ftype = ftype, name = name }
@@ -208,10 +182,8 @@ function M.install(profile)
 	end
 	_G.UnitName = function(u) if tostring(u):lower() == "player" then return M.player.name end return nil end
 	_G.UnitNameUnmodified = function(u)
-		if tostring(u):lower() == "player" then
-			if M.profile == "forever" then return M.player.name, M.player.surname end
-			return M.player.name, M.player.realm
-		end
+		if tostring(u):lower() == "player" then return M.player.name, M.player.surname end
+
 	end
 	_G.GetUnitName = function(u) return _G.UnitName(u) end
 	_G.UnitIsPlayer = function() return false end
@@ -227,7 +199,6 @@ function M.install(profile)
 	_G.IsInGuild = function() return M.inGuild end
 	_G.IsInInstance = function()
 		if M.isBG then return true, "pvp" elseif M.isArena then return true, "arena" end
-		if M.pveInstance then return true, M.pveInstance end	-- "party", "raid", "scenario"
 		return false, "none"
 	end
 	_G.InCombatLockdown = function() return false end
@@ -250,15 +221,8 @@ function M.install(profile)
 	_G.C_PvP = {
 		IsArena = function() return M.isArena end,
 		IsBattleground = function() return M.isBG end,
-		-- Scoreboard entry for a player. Tests put secret values in the numeric fields to model
-		-- the "secret while the match is active" behaviour of 12.x-based clients.
-		GetScoreInfoByPlayerGuid = function(guid)
-			if type(guid) ~= "string" then error("Usage: C_PvP.GetScoreInfoByPlayerGuid(guid)") end
-			if guid ~= M.player.guid then return nil end
-			return M.scoreInfo
-		end,
 	}
-	_G.RequestBattlefieldScoreData = function() M.scoreRequests = M.scoreRequests + 1 end
+
 	_G.C_DeathRecap = { GetRecapEvents = function() return M.recapEvents end }
 	-- Ambiguate(name, context): strips "-Realm" when it is our own realm, as the client does.
 	_G.Ambiguate = function(name, ctx)
@@ -267,11 +231,7 @@ function M.install(profile)
 		if short and realm == M.player.realm then return short end
 		return name
 	end
-	-- Classic clients have single names (no surnames): mimic what GetPlayerInfoByGUID returns there.
-	if M.profile ~= "forever" then
-		M.players["Player-4613-00B5553D"].name = "Marshed"
-		M.players["Player-4613-00B55500"].name = "Strawberrie"
-	end
+
 
 	-- Output side effects
 	_G.PlaySoundFile = function(path, chan) M.sounds[#M.sounds + 1] = { path = path, channel = chan } return true, 1 end
@@ -282,9 +242,6 @@ function M.install(profile)
 	_G.Screenshot = function() M.screenshots = M.screenshots + 1 end
 	_G.SendSystemMessage = function(msg) M.prints[#M.prints + 1] = "SYSTEM:" .. tostring(msg) end
 	_G.C_ChatInfo = {
-		-- Namespaced replacements for the deprecated SendChatMessage / DoEmote globals
-		SendChatMessage = function(msg, chatType, lang, target) M.chat[#M.chat + 1] = { msg = msg, chatType = chatType, target = target, via = "C_ChatInfo" } end,
-		PerformEmote = function(token, target) M.emotes[#M.emotes + 1] = { token = token, target = target, via = "C_ChatInfo" } end,
 		RegisterAddonMessagePrefix = function(p) M.registeredPrefixes[p] = true return 0 end,
 		SendAddonMessage = function(prefix, text, chatType, target)
 			M.comms[#M.comms + 1] = { prefix = prefix, text = text, dist = chatType, target = target, via = "C_ChatInfo" }
@@ -298,10 +255,9 @@ function M.install(profile)
 		GetFriendNumGameAccounts = function(i) return M.bnFriends[i] and #M.bnFriends[i] or 0 end,
 		GetFriendGameAccountInfo = function(i, j) return M.bnFriends[i] and M.bnFriends[i][j] end,
 	}
-	_G.ERR_CHAT_PLAYER_NOT_FOUND_S = "No player named '%s' is currently playing."
 	_G.C_FriendList = { GetNumFriends = function() return 0 end, GetFriendInfoByIndex = function() return nil end }
 	_G.C_AddOns = { IsAddOnLoaded = function() return true end, LoadAddOn = function() return true end,
-		GetAddOnMetadata = function() return nil end }	-- upstream 12.0.006 reads metadata of a placeholder addon at load
+		GetAddOnMetadata = function() return nil end }	-- dgks.lua reads addon metadata while it loads
 	_G.Settings = { OpenToCategory = function() end }
 	_G.SlashCmdList = {}
 
@@ -338,8 +294,9 @@ function M.install(profile)
 		function a:Deserialize(s) return LibStub("AceSerializer-3.0"):Deserialize(s) end
 		function a:SetSinkStorage() end
 		function a:Pour(msg)
-			-- Emulates Blizzard_CombatText throwing on secret values when fed from addon code (12.x)
-			if M.pourThrows then error("Interface/AddOns/Blizzard_CombatText/Shared/CombatText.lua:364: attempt to compare local 'lowestMessage' (a secret number value, while execution tainted by 'dgks')") end
+			-- A test can make the text output fail, as a real output can
+			if M.pourThrows then error("simulated text output failure") end
+
 			M.pours[#M.pours + 1] = tostring(msg)
 		end
 		function a:GetSinkAce3OptionsDataTable() return { type = "group", args = {} } end
@@ -363,9 +320,25 @@ function M.install(profile)
 	function Dlg:AddToBlizOptions(app, name, parent) return _G.CreateFrame("Frame"), name or app end
 end
 
--- Load dgks.lua fresh, run its lifecycle like AceAddon would at PLAYER_LOGIN.
-function M.loadAddon()
-	local chunk, err = loadfile(M.ADDON_DIR .. "/dgks.lua")
+-- dgks.lua as a packaged release ships it: with the --@debug@ blocks commented out, using the same
+-- substitution the packager makes.
+function M.releaseSource()
+	local f = assert(io.open(M.ADDON_DIR .. "/dgks.lua", "rb"))
+	local src = f:read("*a")
+	f:close()
+	return (src:gsub("%-%-@debug@", "--[===[@debug@"):gsub("%-%-@end%-debug@", "--@end-debug@]===]"))
+end
+
+-- Load dgks.lua fresh and run its lifecycle like AceAddon would at PLAYER_LOGIN. By default the
+-- release build is loaded, because that is what players run and debug-only code can hide a problem.
+-- Pass "source" to load the file as it is in the repository, with the debug blocks live.
+function M.loadAddon(build)
+	local chunk, err
+	if build == "source" then
+		chunk, err = loadfile(M.ADDON_DIR .. "/dgks.lua")
+	else
+		chunk, err = loadstring(M.releaseSource(), "=dgks.lua (release)")
+	end
 	assert(chunk, err)
 	chunk("dgks", {})
 	_G.dgks:OnInitialize()
@@ -396,10 +369,6 @@ function M.flushTimers()
 	end
 end
 
-function M.anyFrameRegistered(event)
-	for _, f in ipairs(M.frames) do if f.events[event] then return true end end
-	return false
-end
 
 function M.commsWith(dist)
 	local out = {}
@@ -407,16 +376,6 @@ function M.commsWith(dist)
 	return out
 end
 
-function M.soundsMatching(fragment)
-	local out = {}
-	for _, s in ipairs(M.sounds) do if tostring(s.path):lower():find(fragment:lower(), 1, true) then out[#out + 1] = s end end
-	return out
-end
-
-function M.poursMatching(fragment)
-	for _, p in ipairs(M.pours) do if p:find(fragment, 1, true) then return p end end
-	return nil
-end
 
 -- Was issecretvalue() consulted for this exact value?
 function M.wasSecretChecked(v)
@@ -424,10 +383,5 @@ function M.wasSecretChecked(v)
 	return false
 end
 
--- Deliver a captured addon message back to the addon as the client would (CHAT_MSG_ADDON via AceComm).
-function M.deliver(dgks, comm, sender)
-	dgks:OnCommReceived(comm.prefix, comm.text, comm.dist, sender or "Marshed Malloe")
-	M.flushTimers()
-end
 
 return M

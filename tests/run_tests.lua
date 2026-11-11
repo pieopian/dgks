@@ -49,15 +49,16 @@ local function logHas(dgks, text)
 	return false
 end
 
--- test(name, fn [, setup]): loads a fresh copy of the addon on the Retail 12 / WoW Forever profile.
--- fn(dgks) passes by returning true; setup() runs before the addon loads.
-local function test(name, fn, setup)
-	W.install("forever")
+-- test(name, fn [, setup [, build]]): loads a fresh copy of the addon and runs fn(dgks), which passes by
+-- returning true. setup() runs before the addon loads. The addon is loaded as the release build
+-- (debug blocks stripped, as players get it) unless build is "source".
+local function test(name, fn, setup, build)
+	W.install()
 	delivered = 0
 	W.players[VICTIM2] = { class = "Rogue", eclass = "ROGUE", race = "Human", erace = "Human", sex = 2, name = "Second Victim", realm = "70" }
 	if setup then setup() end
 	local ok, result = pcall(function()
-		local dgks = W.loadAddon()
+		local dgks = W.loadAddon(build)
 		return fn(dgks)
 	end)
 	if ok and result == true then
@@ -72,15 +73,18 @@ end
 io.write("dgks tests against ", addonDir, "\n")
 
 -- Loading ---------------------------------------------------------------------------------------
-test("the addon loads and enables", function() return true end)
-
 test("the release build compiles (debug blocks stripped the way the packager does it)", function()
-	local f = assert(io.open(addonDir .. "/dgks.lua", "rb")); local src = f:read("*a"); f:close()
-	local out = src:gsub("%-%-@debug@", "--[===[@debug@"):gsub("%-%-@end%-debug@", "--@end-debug@]===]")
-	local chunk, err = loadstring(out, "=dgks.lua (release)")
+	local chunk, err = loadstring(W.releaseSource(), "=dgks.lua (release)")
 	if not chunk then error(err, 0) end
 	return true
-end)
+end, nil, "source")
+
+test("the release build loads and enables", function() return true end)
+
+test("the unpackaged source (debug blocks live) loads and handles a kill", function(dgks)
+	kill(dgks)
+	return #W.sounds == 1
+end, nil, "source")
 
 -- Kills -----------------------------------------------------------------------------------------
 test("my kill on a player: one sound, one line of text, one stat entry", function(dgks)
@@ -118,10 +122,14 @@ test("an NPC kill only counts with the PvE option on", function(dgks)
 	return #W.sounds == 1 and logHas(dgks, "killed Kobold Vermin!")
 end)
 
-test("a kill event with secret GUIDs is ignored without an error", function(dgks)
-	W.fire("PARTY_KILL", W.secret("attacker"), W.secret("target"))
+test("a kill event with secret GUIDs is recognised as secret and ignored", function(dgks)
+	-- With the PvE option on, a handler that did not stop at the secret values would go on to look the
+	-- victim up by GUID, which fails on a secret. (Plain Lua cannot make the comparison itself throw.)
+	dgks.db.profile.dopve = true
+	local attacker = W.secret("attacker")
+	W.fire("PARTY_KILL", attacker, W.secret("target"))
 	echo(dgks)
-	return #W.sounds == 0 and #W.comms == 0
+	return W.wasSecretChecked(attacker) and #W.sounds == 0 and #W.comms == 0
 end)
 
 test("with sounds switched off nothing is played, the kill is still logged", function(dgks)
@@ -159,13 +167,15 @@ test("with broadcasts off, other players' kills are ignored", function(dgks)
 	return #W.sounds == 0
 end)
 
-test("a friend on the other faction is not whispered", function()
-	W.bnFriends = { { { characterName = "Anthos Hyde", factionName = "Horde", realmName = "SomeRealm", clientProgram = "WoW", wowProjectID = 18, isOnline = true } } }
-	W.fire("PARTY_KILL", PLAYER, VICTIM)
-	for _, c in ipairs(W.commsWith("WHISPER")) do
-		if c.target == "Anthos Hyde" then return false end
+test("a kill is whispered to a Battle.net friend on my faction, not to one on the other", function()
+	local function friend(name, faction)
+		return { { characterName = name, factionName = faction, realmName = "SomeRealm", clientProgram = "WoW", wowProjectID = 18, isOnline = true } }
 	end
-	return true
+	W.bnFriends = { friend("Good Friend", "Alliance"), friend("Anthos Hyde", "Horde") }
+	W.fire("PARTY_KILL", PLAYER, VICTIM)
+	local whispered = {}
+	for _, c in ipairs(W.commsWith("WHISPER")) do whispered[c.target] = true end
+	return whispered["Good Friend"] == true and whispered["Anthos Hyde"] == nil
 end)
 
 test("a version request is answered with a whisper to the sender", function(dgks)

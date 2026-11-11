@@ -25,8 +25,13 @@ The exit code is the number of failed tests.
 
 ## What they cover
 
-Loading, the release build (debug blocks stripped the way the packager does it), kill and
-multikill detection on the Retail 12 / WoW Forever event path, broadcasts in and out, and duels.
+Kill and multikill detection on the Retail 12 / WoW Forever event path, broadcasts in and out,
+and duels.
+
+The addon is loaded as the **release build**: `dgks.lua` with its `--@debug@` blocks commented
+out, using the same substitution the packager makes. That is what players run, and code that
+only exists inside a debug block can otherwise hide a problem. One test also loads the file as
+it is in the repository, debug blocks live.
 
 ## Limits
 
