@@ -1470,7 +1470,9 @@ end
 
 function dgks:SoundEventHandler(info, sound)
 	if (dgks.db.profile.dosound) then
-		if (tonumber(GetCVar("Sound_EnableAllSound") and GetCVar("Sound_EnableSFX")) == 1) then
+		-- Only the master switch is checked here. Each channel's own switch (Sound Effects, Music,
+		-- Ambience) is applied by the client to the channel the sound is played on.
+		if GetCVar("Sound_EnableAllSound") == "1" then
 			--@debug@
 				-- Dev Debugging functions
 				self.Print("DEBUG: Sound: " .. sound )
